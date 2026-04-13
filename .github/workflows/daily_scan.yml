@@ -3,7 +3,7 @@ name: 🏠 Idealista Daily Scan
 on:
   schedule:
     # Tous les jours à 7h30 heure de Madrid (5h30 UTC en été, 6h30 UTC en hiver)
-    - cron: '30 5 * * *'
+    - cron: '30 6 * * *'
   workflow_dispatch:  # Permet de lancer manuellement depuis GitHub
 
 jobs:

@@ -1,6 +1,14 @@
 """
-Scraper Idealista — utilise Selenium (headless Chrome) pour contourner
-les protections anti-bot du site.
+Scraper Idealista v2 — utilise undetected-chromedriver + comportement humain
+pour contourner la détection anti-bot et les CAPTCHAs.
+
+Stratégie :
+  1. Lance Chrome avec undetected-chromedriver (patche les signaux webdriver)
+  2. Visite d'abord google.es (referrer naturel)
+  3. Navigue vers Idealista via la barre d'adresse
+  4. Accepte les cookies
+  5. Scrolle naturellement avant d'extraire les données
+  6. Pauses aléatoires entre chaque action
 """
 
 import json
@@ -12,10 +20,10 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
@@ -32,7 +40,7 @@ from config import SEARCH_CONFIG, DATA_DIR, SEEN_LISTINGS_FILE
 class Listing:
     id: str
     title: str
-    price: int                  # €/mois
+    price: int
     rooms: Optional[int]
     size_m2: Optional[int]
     floor: Optional[str]
@@ -44,7 +52,7 @@ class Listing:
     has_elevator: Optional[bool]
     has_ac: Optional[bool]
     is_furnished: bool
-    first_seen: str             # ISO timestamp
+    first_seen: str
 
     def summary(self) -> str:
         parts = [f"💰 {self.price}€/mois"]
@@ -62,55 +70,92 @@ class Listing:
 
 
 # ─── BROWSER SETUP ───────────────────────────────────────────────────
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
-
-
-def create_driver() -> webdriver.Chrome:
-    """Crée un navigateur Chrome headless configuré pour éviter la détection."""
-    options = Options()
-    options.add_argument("--headless=new")
+def create_driver() -> uc.Chrome:
+    """
+    Crée un navigateur Chrome avec undetected-chromedriver.
+    Patche automatiquement les propriétés navigator.webdriver,
+    les signatures CDP, et les fingerprints Canvas/WebGL.
+    """
+    options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-extensions")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-    options.add_argument("--lang=es-ES")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--lang=es-ES,es")
 
-    driver = webdriver.Chrome(options=options)
+    # En CI (GitHub Actions), on force headless
+    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
+        options.add_argument("--headless=new")
 
-    # Masquer les propriétés webdriver
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {
-            "source": """
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                window.navigator.chrome = {runtime: {}};
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
-                Object.defineProperty(navigator, 'languages', {get: () => ['es-ES', 'es', 'en']});
-            """
-        },
-    )
+    driver = uc.Chrome(options=options, version_main=None)
+    driver.set_page_load_timeout(30)
+
     return driver
+
+
+# ─── COMPORTEMENT HUMAIN ─────────────────────────────────────────────
+def human_delay(min_s: float = 1.0, max_s: float = 3.0):
+    """Pause aléatoire simulant un humain."""
+    time.sleep(random.uniform(min_s, max_s))
+
+
+def human_scroll(driver, steps: int = 3):
+    """Scrolle la page progressivement comme un humain."""
+    for _ in range(steps):
+        scroll_amount = random.randint(200, 500)
+        driver.execute_script(f"window.scrollBy(0, {scroll_amount});")
+        time.sleep(random.uniform(0.5, 1.5))
+
+
+def accept_cookies(driver):
+    """Clique sur le bouton d'acceptation des cookies si présent."""
+    cookie_selectors = [
+        "#didomi-notice-agree-button",
+        "button[id*='accept']",
+        "button[class*='accept']",
+        "button[id*='cookie']",
+        ".didomi-continue-without-agreeing",
+    ]
+    for selector in cookie_selectors:
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, selector)
+            if btn.is_displayed():
+                human_delay(0.5, 1.5)
+                btn.click()
+                print("  🍪 Cookies acceptés")
+                human_delay(1, 2)
+                return True
+        except (NoSuchElementException, WebDriverException):
+            continue
+    return False
+
+
+def warm_up_session(driver):
+    """
+    Visite google.es d'abord pour établir un historique de navigation
+    naturel avec un referrer crédible.
+    """
+    print("  🌐 Warm-up: visite google.es...")
+    try:
+        driver.get("https://www.google.es")
+        human_delay(2, 4)
+
+        # Accepter les cookies Google si demandé
+        try:
+            google_accept = driver.find_element(By.ID, "L2AGLb")
+            google_accept.click()
+            human_delay(1, 2)
+        except (NoSuchElementException, WebDriverException):
+            pass
+
+    except Exception as e:
+        print(f"  ⚠️  Warm-up Google échoué (pas grave): {e}")
 
 
 # ─── SCRAPING ────────────────────────────────────────────────────────
 def _parse_price(text: str) -> Optional[int]:
-    """Extrait le prix en euros depuis un texte comme '1.200 €/mes'."""
-    match = re.search(r"([\d.]+)\s*€", text.replace(".", ""))
-    if match:
-        return int(match.group(1))
-    # Format avec point comme séparateur de milliers
-    match = re.search(r"([\d]+\.[\d]+)\s*€", text)
+    text = text.replace("\xa0", " ").strip()
+    match = re.search(r"([\d.]+)\s*€", text)
     if match:
         return int(match.group(1).replace(".", ""))
     return None
@@ -121,48 +166,83 @@ def _parse_int(text: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
-def scrape_page(driver: webdriver.Chrome, url: str) -> list[dict]:
-    """Scrape une page de résultats Idealista et retourne les annonces brutes."""
-    print(f"  📄 Chargement: {url}")
+def check_for_captcha(driver) -> bool:
+    page = driver.page_source.lower()
+    indicators = ["captcha", "robot", "verificar", "challenge", "recaptcha", "access denied"]
+    return any(ind in page for ind in indicators)
+
+
+def scrape_page(driver: uc.Chrome, url: str, is_first: bool = False) -> list[dict]:
+    """Scrape une page de résultats Idealista."""
+    print(f"  📄 Chargement: ...{url[-60:]}")
+
     driver.get(url)
+    human_delay(3, 6)
 
-    # Attente aléatoire pour simuler un humain
-    time.sleep(random.uniform(3, 6))
+    if is_first:
+        accept_cookies(driver)
 
-    # Attendre que les annonces soient chargées
+    # Vérifier CAPTCHA
+    if check_for_captcha(driver):
+        print("  ⚠️  CAPTCHA détecté ! Attente longue + retry...")
+        human_delay(15, 30)
+        human_scroll(driver, 2)
+        human_delay(5, 10)
+        driver.refresh()
+        human_delay(5, 8)
+
+        if check_for_captcha(driver):
+            print("  ❌ CAPTCHA persistant — page skippée")
+            # Debug : sauvegarder le HTML
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(f"{DATA_DIR}/debug_captcha.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            return []
+        print("  ✅ CAPTCHA résolu !")
+
+    # Scroller pour charger le lazy-loading
+    human_scroll(driver, 4)
+    human_delay(1, 2)
+    driver.execute_script("window.scrollTo(0, 0);")
+    human_delay(1, 2)
+
+    # Attendre les annonces
     try:
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "article.item"))
         )
     except TimeoutException:
-        # Vérifier si c'est un captcha
-        if "captcha" in driver.page_source.lower():
-            print("  ⚠️  CAPTCHA détecté ! Attente 30s puis retry...")
-            time.sleep(30)
-            driver.refresh()
-            time.sleep(5)
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "article.item"))
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".item-info-container, .listing-item")
                 )
-            except TimeoutException:
-                print("  ❌ Impossible de charger la page (captcha persistant)")
-                return []
-        else:
-            print("  ❌ Timeout — aucune annonce trouvée sur cette page")
+            )
+        except TimeoutException:
+            print("  ❌ Aucune annonce trouvée sur cette page")
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(f"{DATA_DIR}/debug_page.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print("  📝 HTML sauvegardé dans data/debug_page.html")
             return []
 
     articles = driver.find_elements(By.CSS_SELECTOR, "article.item")
+    if not articles:
+        articles = driver.find_elements(By.CSS_SELECTOR, ".item-info-container")
+
     results = []
 
     for article in articles:
         try:
             raw = {}
 
-            # ID unique
-            raw["id"] = article.get_attribute("data-adid") or article.get_attribute("id") or ""
+            raw["id"] = (
+                article.get_attribute("data-adid")
+                or article.get_attribute("data-element-id")
+                or article.get_attribute("id")
+                or ""
+            )
 
-            # Titre et lien
             try:
                 link_el = article.find_element(By.CSS_SELECTOR, "a.item-link")
                 raw["title"] = link_el.text.strip()
@@ -170,45 +250,57 @@ def scrape_page(driver: webdriver.Chrome, url: str) -> list[dict]:
                 if raw["url"] and not raw["url"].startswith("http"):
                     raw["url"] = "https://www.idealista.com" + raw["url"]
             except NoSuchElementException:
-                raw["title"] = ""
-                raw["url"] = ""
+                try:
+                    link_el = article.find_element(By.CSS_SELECTOR, "a[href*='/inmueble/']")
+                    raw["title"] = link_el.text.strip()
+                    raw["url"] = link_el.get_attribute("href") or ""
+                except NoSuchElementException:
+                    raw["title"] = ""
+                    raw["url"] = ""
 
-            # Prix
             try:
-                price_el = article.find_element(By.CSS_SELECTOR, ".item-price")
+                price_el = article.find_element(By.CSS_SELECTOR, ".item-price, .price-row")
                 raw["price_text"] = price_el.text.strip()
             except NoSuchElementException:
                 raw["price_text"] = ""
 
-            # Détails (chambres, m², étage)
             try:
-                details_el = article.find_element(By.CSS_SELECTOR, ".item-detail-char")
+                details_el = article.find_element(
+                    By.CSS_SELECTOR, ".item-detail-char, .item-detail"
+                )
                 raw["details_text"] = details_el.text.strip()
             except NoSuchElementException:
                 raw["details_text"] = ""
 
-            # Description
             try:
-                desc_el = article.find_element(By.CSS_SELECTOR, ".item-description")
+                desc_el = article.find_element(
+                    By.CSS_SELECTOR, ".item-description, .ellipsis"
+                )
                 raw["description"] = desc_el.text.strip()
             except NoSuchElementException:
                 raw["description"] = ""
 
-            # Image
             try:
                 img_el = article.find_element(By.CSS_SELECTOR, "img")
-                raw["image_url"] = img_el.get_attribute("src") or img_el.get_attribute("data-src") or ""
+                raw["image_url"] = (
+                    img_el.get_attribute("src")
+                    or img_el.get_attribute("data-src")
+                    or img_el.get_attribute("data-ondemand-img")
+                    or ""
+                )
             except NoSuchElementException:
                 raw["image_url"] = ""
 
-            # Tags (meublé, ascenseur, clim, etc.)
             try:
-                tags = article.find_elements(By.CSS_SELECTOR, ".item-tags span, .item-highlight")
-                raw["tags"] = [t.text.strip().lower() for t in tags]
+                tags = article.find_elements(
+                    By.CSS_SELECTOR, ".item-tags span, .item-highlight, .listing-tags span"
+                )
+                raw["tags"] = [t.text.strip().lower() for t in tags if t.text.strip()]
             except NoSuchElementException:
                 raw["tags"] = []
 
-            results.append(raw)
+            if raw.get("url") or raw.get("title"):
+                results.append(raw)
 
         except Exception as e:
             print(f"  ⚠️  Erreur parsing annonce: {e}")
@@ -219,52 +311,39 @@ def scrape_page(driver: webdriver.Chrome, url: str) -> list[dict]:
 
 
 def raw_to_listing(raw: dict) -> Optional[Listing]:
-    """Convertit les données brutes en objet Listing structuré."""
     if not raw.get("id") and not raw.get("url"):
         return None
 
-    listing_id = raw.get("id") or raw.get("url", "").split("/")[-2]
+    listing_id = raw.get("id") or raw.get("url", "").rstrip("/").split("/")[-1]
     price = _parse_price(raw.get("price_text", ""))
 
-    # Parser les détails
     details = raw.get("details_text", "")
     rooms = None
     size = None
     floor = None
 
-    for part in details.split("\n"):
+    for part in details.replace("·", "\n").split("\n"):
         part_lower = part.strip().lower()
         if "hab" in part_lower or "dorm" in part_lower:
             rooms = _parse_int(part)
         elif "m²" in part_lower or "m2" in part_lower:
             size = _parse_int(part)
-        elif "planta" in part_lower or "piso" in part_lower or "bajo" in part_lower:
+        elif any(kw in part_lower for kw in ["planta", "bajo", "ático", "entresuelo"]):
             floor = part.strip()
 
-    # Déterminer le quartier depuis l'URL
     url = raw.get("url", "")
     district = ""
     url_parts = url.replace("https://www.idealista.com", "").split("/")
     if len(url_parts) > 2:
         district = url_parts[2] if "madrid" not in url_parts[2] else ""
 
-    # Tags
-    tags = raw.get("tags", [])
-    tags_text = " ".join(tags)
+    tags_text = " ".join(raw.get("tags", []))
     desc_lower = raw.get("description", "").lower()
+    combined = tags_text + " " + desc_lower
 
-    is_furnished = any(
-        kw in tags_text or kw in desc_lower
-        for kw in ["amueblado", "amueblada", "meublé", "furnished"]
-    )
-    has_elevator = any(
-        kw in tags_text or kw in desc_lower
-        for kw in ["ascensor", "elevator", "ascenseur"]
-    )
-    has_ac = any(
-        kw in tags_text or kw in desc_lower
-        for kw in ["aire acondicionado", "climatización", "clim"]
-    )
+    is_furnished = any(kw in combined for kw in ["amueblado", "amueblada", "meublé", "furnished"])
+    has_elevator = any(kw in combined for kw in ["ascensor", "elevator", "ascenseur"])
+    has_ac = any(kw in combined for kw in ["aire acondicionado", "climatización", "clim"])
 
     return Listing(
         id=str(listing_id),
@@ -287,31 +366,19 @@ def raw_to_listing(raw: dict) -> Optional[Listing]:
 
 # ─── FILTRAGE ────────────────────────────────────────────────────────
 def apply_filters(listings: list[Listing]) -> list[Listing]:
-    """Applique les filtres de config.py sur les annonces."""
     filters = SEARCH_CONFIG["filters"]
     filtered = []
-
     for listing in listings:
-        # Filtre prix
         if listing.price > 0 and listing.price > filters["max_price"]:
             continue
-        # Filtre chambres
         if listing.rooms and listing.rooms < filters["min_rooms"]:
             continue
-        # Filtre meublé (la recherche URL filtre déjà, mais double check)
-        if filters["furnished_only"] and not listing.is_furnished:
-            # On garde quand même si on n'a pas pu détecter le meublé
-            # (le filtre URL s'en charge)
-            pass
-
         filtered.append(listing)
-
     return filtered
 
 
 # ─── GESTION DES ANNONCES DÉJÀ VUES ─────────────────────────────────
 def load_seen_ids() -> set[str]:
-    """Charge les IDs des annonces déjà envoyées."""
     if not os.path.exists(SEEN_LISTINGS_FILE):
         return set()
     with open(SEEN_LISTINGS_FILE, "r") as f:
@@ -320,62 +387,64 @@ def load_seen_ids() -> set[str]:
 
 
 def save_seen_ids(seen_ids: set[str]):
-    """Sauvegarde les IDs des annonces déjà envoyées."""
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(SEEN_LISTINGS_FILE, "w") as f:
-        json.dump({"seen_ids": list(seen_ids), "last_update": datetime.now(timezone.utc).isoformat()}, f, indent=2)
+        json.dump(
+            {"seen_ids": list(seen_ids), "last_update": datetime.now(timezone.utc).isoformat()},
+            f, indent=2,
+        )
 
 
 def save_history(listings: list[Listing]):
-    """Ajoute les nouvelles annonces à l'historique."""
     os.makedirs(DATA_DIR, exist_ok=True)
+    history_file = f"{DATA_DIR}/history.json"
     history = []
-    if os.path.exists(SEEN_LISTINGS_FILE.replace("seen_listings", "history")):
-        with open(SEEN_LISTINGS_FILE.replace("seen_listings", "history"), "r") as f:
+    if os.path.exists(history_file):
+        with open(history_file, "r") as f:
             history = json.load(f)
-
     for listing in listings:
         history.append(asdict(listing))
-
-    with open(SEEN_LISTINGS_FILE.replace("seen_listings", "history"), "w") as f:
+    with open(history_file, "w") as f:
         json.dump(history, f, indent=2, ensure_ascii=False)
 
 
 # ─── ORCHESTRATION PRINCIPALE ────────────────────────────────────────
 def run_scraper() -> list[Listing]:
-    """
-    Lance le scraping complet :
-    1. Ouvre le navigateur
-    2. Parcourt les pages de résultats
-    3. Parse et filtre les annonces
-    4. Identifie les nouvelles annonces
-    5. Met à jour le fichier de suivi
-    """
-    print("🚀 Démarrage du scraper Idealista...")
+    print("🚀 Démarrage du scraper Idealista v2 (undetected-chromedriver)...")
     print(f"   URL: {SEARCH_CONFIG['base_url']}")
 
+    os.makedirs(DATA_DIR, exist_ok=True)
     driver = create_driver()
     all_raw = []
 
     try:
-        # Page 1
-        all_raw.extend(scrape_page(driver, SEARCH_CONFIG["base_url"]))
+        warm_up_session(driver)
 
-        # Pages suivantes
+        results = scrape_page(driver, SEARCH_CONFIG["base_url"], is_first=True)
+        all_raw.extend(results)
+
         for page_num in range(2, SEARCH_CONFIG["max_pages"] + 1):
-            time.sleep(random.uniform(5, 10))  # Pause anti-détection
+            if not results:
+                print(f"  ℹ️  Page précédente vide, arrêt pagination")
+                break
+
+            wait = random.uniform(8, 15)
+            print(f"  ⏳ Pause {wait:.0f}s avant page {page_num}...")
+            time.sleep(wait)
+
             separator = "&" if "?" in SEARCH_CONFIG["base_url"] else "?"
             page_url = f"{SEARCH_CONFIG['base_url']}{separator}pagina={page_num}"
             results = scrape_page(driver, page_url)
-            if not results:
-                print(f"  ℹ️  Pas de résultats page {page_num}, arrêt pagination")
-                break
             all_raw.extend(results)
 
+    except Exception as e:
+        print(f"❌ Erreur fatale: {e}")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
-    # Conversion et filtrage
     print(f"\n📊 {len(all_raw)} annonces brutes récupérées")
     listings = [raw_to_listing(r) for r in all_raw]
     listings = [l for l in listings if l is not None]
@@ -384,12 +453,19 @@ def run_scraper() -> list[Listing]:
     listings = apply_filters(listings)
     print(f"   {len(listings)} après filtrage critères")
 
-    # Identifier les nouvelles
+    seen_in_batch = set()
+    unique = []
+    for l in listings:
+        if l.id not in seen_in_batch:
+            seen_in_batch.add(l.id)
+            unique.append(l)
+    listings = unique
+    print(f"   {len(listings)} après déduplication")
+
     seen_ids = load_seen_ids()
     new_listings = [l for l in listings if l.id not in seen_ids]
     print(f"   🆕 {len(new_listings)} NOUVELLES annonces !")
 
-    # Sauvegarder
     if new_listings:
         new_ids = {l.id for l in new_listings}
         save_seen_ids(seen_ids | new_ids)

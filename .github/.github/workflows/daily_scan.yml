@@ -1,0 +1,55 @@
+name: 🏠 Idealista Daily Scan
+
+on:
+  schedule:
+    # Tous les jours à 7h30 heure de Madrid (5h30 UTC en été, 6h30 UTC en hiver)
+    - cron: '30 5 * * *'
+  workflow_dispatch:  # Permet de lancer manuellement depuis GitHub
+
+jobs:
+  scrape-and-notify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: 🌐 Install Chrome + deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable || true
+          google-chrome --version || chromium-browser --version || echo "Chrome will be auto-downloaded by undetected-chromedriver"
+
+      - name: 📂 Restore seen listings cache
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: idealista-seen-${{ github.run_number }}
+          restore-keys: |
+            idealista-seen-
+
+      - name: 🏠 Run scraper
+        env:
+          IDEALISTA_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          IDEALISTA_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          IDEALISTA_RECIPIENTS: ${{ secrets.RECIPIENTS }}
+        run: |
+          python main.py
+
+      - name: 💾 Save data artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-data-${{ github.run_number }}
+          path: data/
+          retention-days: 30
