@@ -70,11 +70,27 @@ class Listing:
 
 
 # ─── BROWSER SETUP ───────────────────────────────────────────────────
+def _detect_chrome_version() -> int | None:
+    """Détecte la version majeure de Chrome installée."""
+    import subprocess
+    for cmd in ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]:
+        try:
+            output = subprocess.check_output([cmd, "--version"], stderr=subprocess.DEVNULL).decode()
+            match = re.search(r"(\d+)\.", output)
+            if match:
+                version = int(match.group(1))
+                print(f"  🔍 Chrome détecté: v{version} ({cmd})")
+                return version
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    return None
+
+
 def create_driver() -> uc.Chrome:
     """
     Crée un navigateur Chrome avec undetected-chromedriver.
-    Patche automatiquement les propriétés navigator.webdriver,
-    les signatures CDP, et les fingerprints Canvas/WebGL.
+    Détecte automatiquement la version de Chrome installée
+    pour éviter les erreurs de version mismatch.
     """
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
@@ -87,7 +103,9 @@ def create_driver() -> uc.Chrome:
     if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
         options.add_argument("--headless=new")
 
-    driver = uc.Chrome(options=options)
+    # Détecter la version de Chrome pour matcher le ChromeDriver
+    chrome_version = _detect_chrome_version()
+    driver = uc.Chrome(options=options, version_main=chrome_version)
     driver.set_page_load_timeout(30)
 
     return driver
