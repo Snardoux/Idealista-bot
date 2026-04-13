@@ -6,12 +6,7 @@ Modifie ces paramètres selon tes critères de recherche.
 # ─── CRITÈRES DE RECHERCHE ───────────────────────────────────────────
 SEARCH_CONFIG = {
     # URL de base Idealista (location meublée, 3+ chambres, Madrid, max 2400€)
-    "base_url": (
-        "https://www.idealista.com/alquiler-viviendas/madrid-madrid/"
-        "con-de-tres-dormitorios,de-cuatro-dormitorios,de-cinco-dormitorios-o-mas/"
-        "precio-hasta_2400/amueblado_amueblados/"
-        "?ordenado-por=fecha-publicacion-desc"
-    ),
+    "base_url": "https://www.idealista.com/fr/multi/alquiler-viviendas/ayD,ayF,ayG,ayH,ayK,ayL,ayM,ayP,ayV,ayW/con-precio-hasta_2400,pisos,de-tres-dormitorios,de-cuatro-cinco-habitaciones-o-mas,amueblado_amueblados,alquiler-de-larga-temporada/?ordenado-por=fecha-publicacion-desc",
     # Nombre max de pages à scanner (chaque page ≈ 30 annonces)
     "max_pages": 5,
     # Filtres supplémentaires appliqués APRÈS scraping
