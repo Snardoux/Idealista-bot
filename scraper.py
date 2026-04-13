@@ -87,7 +87,7 @@ def create_driver() -> uc.Chrome:
     if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
         options.add_argument("--headless=new")
 
-    driver = uc.Chrome(options=options, version_main=None)
+    driver = uc.Chrome(options=options)
     driver.set_page_load_timeout(30)
 
     return driver
